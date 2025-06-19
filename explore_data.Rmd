@@ -1,0 +1,69 @@
+---
+title: "Exploring data"
+author: "Juan Rocha"
+date: "2025-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(network)
+library(ergm)
+library(fs)
+```
+
+## Datasets:
+
+Currently there is the following datasets downloaded from SunNet:
+
+```{r}
+dir_info("data/raw/")
+```
+
+-   LinkAlter: is the data of connections between alters $i,j$ as reported by node $k$ but it does not include the links from $k,i|k,j$.
+-   Alter and Ego are node level attributes from the survey, but they differ in detail. Ego info is more rich, all questions answered. Alter info is as perceived from the Ego, not all questions available.
+-   `EGO_ALTER_CLEANED_ONLY PEER` contains the full survey.
+
+```{r warning = FALSE, message=FALSE}
+## links: 
+link_alter <- read_csv("data/raw/Original Datase_linkAlter_All observations.csv")
+alter <- read_csv("data/raw/Original Dataset_Alter_All observations.csv")
+ego <- read_csv("data/raw/Original Dataset_Ego_All observations.csv")
+mat <- read_csv("data/raw/Original dataset_EGO_ALTER_CLEANED_ONLY PEER.csv")
+```
+
+First clean up LinkAlter to create a full network:
+
+```{r}
+link_alter
+```
+
+```{r}
+# rename:
+names(link_alter) <- names(link_alter) |> 
+    str_remove_all("networkcanvas") |> 
+    str_replace(pattern = "uu", replacement =  "_") 
+
+link_alter <- link_alter |> rename(uu_id = `_id`)
+
+net <- link_alter |> # 3410
+    select(source_id, target_id) |> 
+    bind_rows(link_alter |> select(source_id = ego_id, target_id = source_id) |>
+                  unique() ) |> #3950
+    bind_rows(link_alter |> select(source_id = ego_id, target_id) |> unique()) |> # 4490
+    unique() |> # 3975
+    network(directed = TRUE, matrix.type = "edgelist", ignore.eval = TRUE)
+
+plot.network(
+    net, displayisolates = TRUE, edge.col = alpha("grey50", alpha = 0.4), vertex.col = "orange",
+    vertex.border = 0, edge.lwd = 0.01)
+
+```
+
+Extract the node and edge list to create attributes:
+
+```{r}
+nodes <- tibble(node = network.vertex.names(net))
+edges <- as.edgelist(net)
+```
