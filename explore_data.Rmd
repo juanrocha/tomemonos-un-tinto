@@ -45,15 +45,42 @@ names(link_alter) <- names(link_alter) |>
     str_remove_all("networkcanvas") |> 
     str_replace(pattern = "uu", replacement =  "_") 
 
-link_alter <- link_alter |> rename(uu_id = `_id`)
+link_alter <- link_alter |> 
+    rename(link_id = `_id`) 
 
-net <- link_alter |> # 3410
-    select(source_id, target_id) |> 
-    bind_rows(link_alter |> select(source_id = ego_id, target_id = source_id) |>
-                  unique() ) |> #3950
-    bind_rows(link_alter |> select(source_id = ego_id, target_id) |> unique()) |> # 4490
-    unique() |> # 3975
-    network(directed = TRUE, matrix.type = "edgelist", ignore.eval = TRUE)
+# net <- link_alter |> # 3410
+#     select(source_id, target_id) |> 
+#     bind_rows(link_alter |> select(source_id = ego_id, target_id = source_id) |>
+#                   unique() ) |> #3950
+#     bind_rows(link_alter |> select(source_id = ego_id, target_id) |> unique()) |> # 4490
+#     unique() |> # 3975
+#     network(directed = TRUE, matrix.type = "edgelist", ignore.eval = TRUE)
+
+df_mat <- mat |> 
+    select(source = idencuesta,  target = idal, ego_id = networkcanvasegouuid, alter_id = networkcanvasuuid) 
+
+df_alters <- link_alter |> 
+    filter(connectionalter == 1) |> 
+    select(ego_id, alter_id = source_id, target_id) |> 
+    left_join(df_mat) |> 
+    rename(ego_old = ego_id, ego_id = alter_id, alter_id = target_id) |> 
+    select(-ego_old)
+
+df_edges <- bind_rows(df_mat, df_alters) |> 
+    filter(!is.na(source), !is.na(target)) |> 
+    unique()
+
+df_nodes <- df_edges |> 
+    pivot_longer(cols = c(source, target), names_to = "role", values_to = 'node_id') |> 
+    pivot_longer(cols = c(ego_id, alter_id), names_to = "roles", values_to = "alias") |> 
+    select(node_id, alias) |> 
+    unique()
+
+net <- network(
+    df_edges |> select(source, target) |> unique(), 
+    directed = TRUE, matrix.type = "edgelist", ignore.eval = TRUE
+)
+
 
 plot.network(
     net, displayisolates = TRUE, edge.col = alpha("grey50", alpha = 0.4), vertex.col = "orange",
@@ -64,6 +91,66 @@ plot.network(
 Extract the node and edge list to create attributes:
 
 ```{r}
-nodes <- tibble(node = network.vertex.names(net))
+nodes <- tibble(node = network.vertex.names(net)) |> 
+    # id is the id in the network object, node_id is the id in the database (df_nodes). node_id is need to merge with attributes.
+    rownames_to_column("id") |> 
+    mutate(id = as.numeric(id)) |> rename(node_id = node)
 edges <- as.edgelist(net)
+
+edges <- edges |> as_tibble() |> 
+    rename(source = V1, target = V2) |> 
+    mutate(source = as.numeric(source), target = as.numeric(target))
+
+edges <- edges |>
+    left_join(nodes, by = c("source" = "node_id")) |> 
+    rename(source_id = node) |> 
+    left_join(nodes, by = c("target" = "node_id")) |> 
+    rename(target_id = node)
+edges
 ```
+
+Node attributes: `ego` and `altitude` don't exist on the dataset
+
+```{r}
+## Egos
+ egos <- mat |> 
+    select(node_id = idencuesta, shadechanges, starts_with("ferti"), starts_with("village"), egoleader, leader, starts_with("sex"), starts_with("education"), birth, starts_with("training"), nespresso = certifitype_6, starts_with("cliper"), expe, starts_with("area")) |> 
+    unique() |> 
+    group_by(node_id) |>
+    mutate(leader = case_when(any(leader) ~ TRUE, .default = sum(leader))) |> unique() |> 
+    mutate(
+        shadechanges = shadechanges,
+        fert_org = ferti_5 == TRUE | ferti_6 == TRUE,
+        village = case_when(
+            village_1 == TRUE ~ "1",
+            village_2 == TRUE ~ "2",
+            village_3 == TRUE ~ "3"),
+        sex = case_when(sex_1 == TRUE ~ "woman", sex_2 == TRUE ~ "man"),
+        education = case_when(
+            education_1 == TRUE ~ "none", 
+            education_2 == TRUE ~ "pre-school", 
+            education_3 == TRUE ~ "primary", 
+            education_4 == TRUE ~ "secondary", 
+            education_5 == TRUE ~ "superior"),
+        age = 2025 - birth,
+        training_shade = training_1, training_organics = training_2,
+        area = case_when(
+            areafincauni_1 == TRUE ~ areafarm,
+            areafincauni_2 == TRUE ~ areafarm/10000,
+            areafincauni_3 == TRUE ~ areafarm*0.643),
+        ) |> 
+    select(node_id, shadechanges, fert_org, village, sex, education, age, training_shade, training_organics, area, egoleader, leader, nespresso:expe )
+
+# alters
+mat |> select(node_id = idal, starts_with("shadealter"), starts_with("alterferti"), starts_with("altervillage"), leader, starts_with("sex"), name) 
+```
+
+`shadealter_` is a property of the alter
+
+```{r}
+## alters
+mat |> select(starts_with("shadealter"))
+```
+
+For response variables we probably need to code them as categorical or continuous.
+Categorical may be more convenient in ergms, but continuous if used as a response variable in a linear model.
