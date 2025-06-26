@@ -11,6 +11,7 @@ library(tidyverse)
 library(network)
 library(ergm)
 library(fs)
+library(genero)
 ```
 
 ## Datasets:
@@ -31,6 +32,16 @@ link_alter <- read_csv("data/raw/Original Datase_linkAlter_All observations.csv"
 alter <- read_csv("data/raw/Original Dataset_Alter_All observations.csv")
 ego <- read_csv("data/raw/Original Dataset_Ego_All observations.csv")
 mat <- read_csv("data/raw/Original dataset_EGO_ALTER_CLEANED_ONLY PEER.csv")
+```
+
+Correct manually a problem with a duplicated node id:
+
+```{r}
+mat <- mat |> 
+    mutate(idal = case_when(
+        name == "HENRY SIERRA" ~ 223,
+        .default = idal
+    )) #|> filter(name == "HENRY SIERRA") |> select(name, mapalter, idal)
 ```
 
 First clean up LinkAlter to create a full network:
@@ -102,14 +113,32 @@ edges <- edges |> as_tibble() |>
     mutate(source = as.numeric(source), target = as.numeric(target))
 
 edges <- edges |>
-    left_join(nodes, by = c("source" = "node_id")) |> 
-    rename(source_id = node) |> 
-    left_join(nodes, by = c("target" = "node_id")) |> 
-    rename(target_id = node)
+    left_join(nodes, by = c("source" = "id")) |> 
+    rename(source_id = node_id) |> 
+    left_join(nodes, by = c("target" = "id")) |> 
+    rename(target_id = node_id)
 edges
 ```
 
 Node attributes: `ego` and `altitude` don't exist on the dataset
+
+Function to chose the opinion of the majority:
+
+```{r}
+# function for the majority
+
+x <- c("Mantenido", NA, "Mantenido","Sembrado", NA)
+
+majority <- function(x){
+    if(length(x) == 1 | all(is.na(x))) 
+        return(NA)
+    else
+        tbl <- table(x) |> sort(decreasing = TRUE)
+        return(names(tbl)[1])
+}
+
+majority(c(NA, NA, NA))
+```
 
 ```{r}
 ## Egos
@@ -125,7 +154,7 @@ Node attributes: `ego` and `altitude` don't exist on the dataset
             village_1 == TRUE ~ "1",
             village_2 == TRUE ~ "2",
             village_3 == TRUE ~ "3"),
-        sex = case_when(sex_1 == TRUE ~ "woman", sex_2 == TRUE ~ "man"),
+        sex = case_when(sex_1 == TRUE ~ "female", sex_2 == TRUE ~ "male"),
         education = case_when(
             education_1 == TRUE ~ "none", 
             education_2 == TRUE ~ "pre-school", 
@@ -142,14 +171,59 @@ Node attributes: `ego` and `altitude` don't exist on the dataset
     select(node_id, shadechanges, fert_org, village, sex, education, age, training_shade, training_organics, area, egoleader, leader, nespresso:expe )
 
 # alters
-mat |> select(node_id = idal, starts_with("shadealter"), starts_with("alterferti"), starts_with("altervillage"), leader, starts_with("sex"), name) 
+alters <- mat |> select(node_id = idal, starts_with("shadealter"), starts_with("alterferti"), starts_with("altervillage"), leader, name, ) |> 
+    mutate(sex = genero(name)) |> 
+    mutate(sex = case_when(
+        name == "LEONILDE GOMEZ" ~ "female",
+        is.na(sex) ~ "male",
+        .default = sex
+    )) |> 
+    mutate(shadechanges = case_when(
+        shadealter_1 == TRUE ~ "Sembrado",
+        shadealter_2 == TRUE ~ "Mantenido",
+        shadealter_3 == TRUE ~ "Disminuido",
+        shadealter_4 == TRUE ~ NA,
+        shadealter_5 == TRUE ~ NA,
+        shadealter_6 == TRUE ~ NA,
+        shadealter_7 == TRUE ~ NA
+    )) |> select(-starts_with("shadealter")) |> 
+    mutate(fert_org = case_when(
+        alterferti_1 == TRUE ~ TRUE,
+        alterferti_2 == TRUE ~ FALSE,
+        alterferti_3 == TRUE ~ NA,
+        alterferti_4 == TRUE ~ NA
+    )) |> select(-starts_with("alterferti")) |> 
+    mutate(village = case_when(
+        altervillage_1 == TRUE ~ "1",
+        altervillage_2 == TRUE ~ "2",
+        altervillage_3 == TRUE ~ "3"
+    )) |> select(-starts_with("altervillage")) |> 
+    arrange(node_id) |> 
+    group_by(node_id) |> 
+    summarize(
+        leader = any(leader), name = unique(name), sex = unique(sex),
+        shadechanges = majority(shadechanges),
+        fert_org = any(fert_org), village = unique(village)
+    )
 ```
 
-`shadealter_` is a property of the alter
-
 ```{r}
-## alters
-mat |> select(starts_with("shadealter"))
+
+alters |> summarize(n = n()) |> arrange(desc(n))
+
+alters$village[c(39,98,134)] <- c(1,3,1)
+alters$name[21] <- alters$name[20]
+
+alters <- alters |> 
+    filter(!is.na(node_id)) |> 
+    unique() #|> summarize(n = n()) |> arrange(desc(n))
+
+bind_rows(ungroup(egos),ungroup(alters)) |> 
+    group_by(node_id) |> 
+    arrange(node_id) |> 
+    add_tally() |> 
+    filter(!(n == 2 & is.na(age))) |> 
+    filter(!node_id %in% nodes$node_id)
 ```
 
 For response variables we probably need to code them as categorical or continuous.
