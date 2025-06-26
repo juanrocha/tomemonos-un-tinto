@@ -218,13 +218,39 @@ alters <- alters |>
     filter(!is.na(node_id)) |> 
     unique() #|> summarize(n = n()) |> arrange(desc(n))
 
-bind_rows(ungroup(egos),ungroup(alters)) |> 
+node_attrs <- bind_rows(ungroup(egos),ungroup(alters)) |> 
     group_by(node_id) |> 
     arrange(node_id) |> 
     add_tally() |> 
     filter(!(n == 2 & is.na(age))) |> 
-    filter(!node_id %in% nodes$node_id)
+    filter(node_id %in% nodes$node_id)
+
+node_attrs
 ```
+
+There are 6 isolates on the network, they will be dropped when setting node level attributes.
 
 For response variables we probably need to code them as categorical or continuous.
 Categorical may be more convenient in ergms, but continuous if used as a response variable in a linear model.
+
+## LNAM \| BNAM
+
+```{r}
+library(sna)
+
+fit <- lnam(
+    y = node_attrs |> 
+        mutate(shadechanges = case_when(
+            shadechanges == "Sembrado" ~ 1,
+            shadechanges == "Disminuido" ~ -1,
+            .default = 0
+        )) |> pull(shadechanges),
+    x = node_attrs |> ungroup() |> select(village, leader, sex) |>
+        mutate(village = as.numeric(village),
+            sex = case_when(sex == "male" ~ 0, .default = 1) ) |> 
+        as.matrix(),
+    W1 = list(as.matrix.network.adjacency(net))
+)
+
+summary(fit)
+```
