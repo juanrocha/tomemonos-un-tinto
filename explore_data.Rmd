@@ -230,27 +230,157 @@ node_attrs
 
 There are 6 isolates on the network, they will be dropped when setting node level attributes.
 
+```{r}
+nodes <- nodes |> 
+    left_join(node_attrs)
+nodes <- select(nodes, -name, -n, )
+# set node attributes:
+
+atrs <- names(nodes)[3:26]
+
+for (i in seq_along(atrs)){
+    x = atrs[i]
+    net %v% x <- as.vector(nodes[x])
+}
+
+net %v% "shadechanges" <- nodes$shadechanges
+net %v% "fert_org" <- nodes$fert_org
+net %v% "village" <- nodes$village
+net %v% "sex" <- nodes$sex
+net %v% "education" <- nodes$education
+net %v% "age" <- nodes$age
+net %v% "training_shade" <- nodes$training_shade
+net %v% "training_organics" <- nodes$training_organics
+net %v% "area" <- nodes$area
+net %v% "egoleader" <- nodes$egoleader
+net %v% "leader" <- nodes$leader
+net %v% "nespresso" <- nodes$nespresso
+net %v% "clipercdro" <- nodes$clipercdro
+net %v% "clipercrain" <- nodes$clipercrain
+net %v% "clipercwater" <- nodes$clipercwater
+net %v% "clipercwater2" <- nodes$clipercwater2
+net %v% "clipercbio" <- nodes$clipercbio
+net %v% "clipercdefo" <- nodes$clipercdefo
+net %v% "clipercdies" <- nodes$clipercdies
+net %v% "cliperclabor" <- nodes$cliperclabor
+net %v% "clipercpricein" <- nodes$clipercpricein
+net %v% "cliperccredit" <- nodes$cliperccredit
+net %v% "clipercyouth" <- nodes$clipercyouth
+net %v% "expe" <- nodes$expe
+```
+
+Edge attributes:
+
+```{r}
+edges <- edges |> 
+    left_join(
+        mat |> select(source_id = idencuesta, target_id = idal, frequency, close, starts_with("rela")) |> 
+    rename(rela_contracts = rela_1, rela_transaction = rela_2, 
+           rela_professional = rela_3, rela_trust = rela_4, rela_friends = rela_5,
+           rela_family = rela_6, rela_acquintance = rela_7)
+    )
+atrs <- names(edges)[5:13]
+# for (i in seq_along(atrs)){
+#     net %e% atrs[i] <- edges[atrs[i]]
+# }
+net %e% "frequency" <- edges$frequency
+net %e% "close" <- edges$close
+net %e% "rela_contracts" <- edges$rela_contracts
+net %e% "rela_transaction" <- edges$rela_transaction
+net %e% "rela_professional" <- edges$rela_professional
+net %e% "rela_trust" <- edges$rela_trust
+net %e% "rela_friends" <- edges$rela_friends
+net %e% "rela_family" <- edges$rela_family
+net %e% "rela_acquintance" <- edges$rela_acquintance
+    
+
+save(net, nodes, edges, file = "data/network_cleaned.Rda")
+```
+
 For response variables we probably need to code them as categorical or continuous.
 Categorical may be more convenient in ergms, but continuous if used as a response variable in a linear model.
 
 ## LNAM \| BNAM
 
 ```{r}
+load("data/network_cleaned.Rda")
 library(sna)
+
+e <- node_attrs |> 
+    filter(!is.na(shadechanges), !is.na(age)) |> 
+    pull(node_id)
 
 fit <- lnam(
     y = node_attrs |> 
+        filter(node_id %in% e) |> 
         mutate(shadechanges = case_when(
             shadechanges == "Sembrado" ~ 1,
             shadechanges == "Disminuido" ~ -1,
             .default = 0
         )) |> pull(shadechanges),
-    x = node_attrs |> ungroup() |> select(village, leader, sex) |>
+    x = node_attrs |> ungroup() |> 
+        filter(node_id %in% e) |> 
+        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso) |>
         mutate(village = as.numeric(village),
-            sex = case_when(sex == "male" ~ 0, .default = 1) ) |> 
+            area = case_when(is.na(area) ~ 5.1, .default = area),
+            sex = case_when(sex == "male" ~ 0, .default = 1),
+            education = case_when(
+                education == "none" ~ 0, education == "primary" ~ 1,
+                education == "secondary"~2, education == "superior" ~ 3,
+                .default = 0),
+            training_shade = as.numeric(training_shade), 
+            nespresso = as.numeric(nespresso)) |> 
         as.matrix(),
-    W1 = list(as.matrix.network.adjacency(net))
+    W1 = list(
+        as.matrix.network.adjacency(
+            get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
+            attrname = "close")
+        ),
+    W2 = list(
+        as.matrix.network.adjacency(
+            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
+            attrname = "frequency")
+        )
 )
 
 summary(fit)
 ```
+
+```{r}
+library(BANAM)
+
+bfit <- banam(
+      (node_attrs |> 
+        filter(node_id %in% e) |> 
+        mutate(shadechanges = case_when(
+            shadechanges == "Sembrado" ~ 1,
+            shadechanges == "Disminuido" ~ -1,
+            .default = 0
+        )) |> pull(shadechanges)) ,
+      X = ( node_attrs |> ungroup() |> 
+        filter(node_id %in% e) |> 
+        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso) |>
+        mutate(village = as.numeric(village),
+            area = case_when(is.na(area) ~ 5.1, .default = area),
+            sex = case_when(sex == "male" ~ 0, .default = 1),
+            education = case_when(
+                education == "none" ~ 0, education == "primary" ~ 1,
+                education == "secondary"~2, education == "superior" ~ 3,
+                .default = 0),
+            training_shade = as.numeric(training_shade), 
+            nespresso = as.numeric(nespresso)) |> 
+        as.matrix()),
+      W = list(
+        as.matrix.network.adjacency(
+            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
+            attrname = "frequency"),
+        as.matrix.network.adjacency(
+            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
+            attrname = "close")
+        )
+)
+
+summary(bfit)
+```
+
+## ERGMs

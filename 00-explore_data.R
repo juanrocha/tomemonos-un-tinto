@@ -2,6 +2,11 @@ library(tidyverse)
 library(network)
 library(ergm)
 
+## experiment with remote access: https://su.drive.sunet.se/f/163991126 | https://su.drive.sunet.se/s/wWrKGgHN9WSxPmt
+# tst <- curl::curl(
+#     url = paste0("https://su.drive.sunet.se/remote.php/dav/files/juro7132%40su.se/wWrKGgHN9WSxPmt")
+# )
+# tst <- read_csv("https://su.drive.sunet.se/s/wWrKGgHN9WSxPmt")
 
 ## links: 
 link_alter <- read_csv("data/raw/Original Datase_linkAlter_All observations.csv")
