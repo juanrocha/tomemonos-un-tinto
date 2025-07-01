@@ -12,6 +12,7 @@ library(network)
 library(ergm)
 library(fs)
 library(genero)
+library(stargazer)
 ```
 
 ## Datasets:
@@ -32,6 +33,8 @@ link_alter <- read_csv("data/raw/Original Datase_linkAlter_All observations.csv"
 alter <- read_csv("data/raw/Original Dataset_Alter_All observations.csv")
 ego <- read_csv("data/raw/Original Dataset_Ego_All observations.csv")
 mat <- read_csv("data/raw/Original dataset_EGO_ALTER_CLEANED_ONLY PEER.csv")
+
+coords <- read_csv("data/raw/Coordinates_others cleaned EGO.csv")
 ```
 
 Correct manually a problem with a duplicated node id:
@@ -225,7 +228,8 @@ node_attrs <- bind_rows(ungroup(egos),ungroup(alters)) |>
     filter(!(n == 2 & is.na(age))) |> 
     filter(node_id %in% nodes$node_id)
 
-node_attrs
+node_attrs <- node_attrs |> 
+    left_join(coords, by = c("node_id" = "idencuesta"))
 ```
 
 There are 6 isolates on the network, they will be dropped when setting node level attributes.
@@ -234,14 +238,20 @@ There are 6 isolates on the network, they will be dropped when setting node leve
 nodes <- nodes |> 
     left_join(node_attrs)
 nodes <- select(nodes, -name, -n, )
+
+nodes <- nodes |> 
+    mutate(
+        indegree = degree(net, g = "digraph", cmode = "indegree"),
+        outdegree = degree(net, g = "digraph", cmode = "outdegree"),
+        bet = betweenness(net, gmode = "digraph", cmode = "directed", rescale = TRUE)
+    )
 # set node attributes:
-
-atrs <- names(nodes)[3:26]
-
-for (i in seq_along(atrs)){
-    x = atrs[i]
-    net %v% x <- as.vector(nodes[x])
-}
+# atrs <- names(nodes)[3:26]
+# 
+# for (i in seq_along(atrs)){
+#     x = atrs[i]
+#     net %v% x <- as.vector(nodes[x])
+# }
 
 net %v% "shadechanges" <- nodes$shadechanges
 net %v% "fert_org" <- nodes$fert_org
@@ -267,6 +277,13 @@ net %v% "clipercpricein" <- nodes$clipercpricein
 net %v% "cliperccredit" <- nodes$cliperccredit
 net %v% "clipercyouth" <- nodes$clipercyouth
 net %v% "expe" <- nodes$expe
+net %v% "tspecies" <- nodes$tspecies
+net %v% "plantfuture" <- nodes$plantfuture
+net %v% "shalev" <- nodes$shalev
+net %v% "futuferti" <- nodes$futuferti
+net %v% "indegree" <- nodes$indegree
+net %v% "outdegree" <- nodes$outdegree
+net %v% "betweenness" <- nodes$bet
 ```
 
 Edge attributes:
@@ -310,6 +327,9 @@ e <- node_attrs |>
     filter(!is.na(shadechanges), !is.na(age)) |> 
     pull(node_id)
 
+node_attrs <-  node_attrs |> left_join(nodes)
+
+
 fit <- lnam(
     y = node_attrs |> 
         filter(node_id %in% e) |> 
@@ -317,10 +337,12 @@ fit <- lnam(
             shadechanges == "Sembrado" ~ 1,
             shadechanges == "Disminuido" ~ -1,
             .default = 0
-        )) |> pull(shadechanges),
+        )) |>
+        pull(shadechanges),
     x = node_attrs |> ungroup() |> 
         filter(node_id %in% e) |> 
-        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso) |>
+        mutate(intercept = 1) |> 
+        select(intercept, village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso, tspecies, shalev, indegree, outdegree, bet) |>
         mutate(village = as.numeric(village),
             area = case_when(is.na(area) ~ 5.1, .default = area),
             sex = case_when(sex == "male" ~ 0, .default = 1),
@@ -329,7 +351,8 @@ fit <- lnam(
                 education == "secondary"~2, education == "superior" ~ 3,
                 .default = 0),
             training_shade = as.numeric(training_shade), 
-            nespresso = as.numeric(nespresso)) |> 
+            nespresso = as.numeric(nespresso),
+            interact = shalev * leader) |> 
         as.matrix(),
     W1 = list(
         as.matrix.network.adjacency(
@@ -344,6 +367,8 @@ fit <- lnam(
 )
 
 summary(fit)
+
+#stargazer(fit, header = FALSE)
 ```
 
 ```{r}
@@ -357,9 +382,10 @@ bfit <- banam(
             shadechanges == "Disminuido" ~ -1,
             .default = 0
         )) |> pull(shadechanges)) ,
-      X = ( node_attrs |> ungroup() |> 
+      X = (node_attrs |> ungroup() |> 
         filter(node_id %in% e) |> 
-        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso) |>
+       # mutate(intercept = 1) |> 
+        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso, tspecies, shalev, indegree, outdegree, bet) |>
         mutate(village = as.numeric(village),
             area = case_when(is.na(area) ~ 5.1, .default = area),
             sex = case_when(sex == "male" ~ 0, .default = 1),
@@ -384,3 +410,16 @@ summary(bfit)
 ```
 
 ## ERGMs
+
+Exponential random graph models explore the generative process of the network by modeling link formation, the probability of a link.
+It is not sufficient to explore network diffusion / network influence.
+But if the behaviour we want to test is adoption of shading or organic fertilizing, and it is socially diffused, the prob of links should be higher between people with such attributes, and stronger (e.g. edge weight).
+
+```{r}
+fit_ego <- ergm(
+    get.inducedSubgraph(net, v = which(!is.na(net %v% "age"))) ~ edges +
+        
+)
+
+summary(fit_ego)
+```
