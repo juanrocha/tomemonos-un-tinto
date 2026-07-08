@@ -1,8 +1,19 @@
 ---
-title: "Exploring data"
+title: "Exploring NetAdopt data"
 author: "Juan Rocha"
-date: "2025-06-18"
-output: html_document
+date: "2026-07-08"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    highlight: tango
+    df_print: paged
+    theme:
+      bootswatch: cosmo
+      code_font:
+        google: Fira Code
+editor_options:
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -13,9 +24,12 @@ library(ergm)
 library(fs)
 library(genero)
 library(stargazer)
+library(sna)
+library(sf)
+library(tictoc)
 ```
 
-## Datasets:
+## Datasets & cleaning
 
 Currently there is the following datasets downloaded from SunNet:
 
@@ -202,19 +216,19 @@ alters <- mat |> select(node_id = idal, starts_with("shadealter"), starts_with("
         altervillage_3 == TRUE ~ "3"
     )) |> select(-starts_with("altervillage")) |> 
     arrange(node_id) |> 
-    group_by(node_id) |> 
-    summarize(
-        leader = any(leader), name = unique(name), sex = unique(sex),
+    group_by(node_id) |> #filter(node_id == 59)
+    summarize( # variables with [1] are not unique, selecting first value
+        leader = any(leader), name = unique(name)[1], sex = unique(sex),
         shadechanges = majority(shadechanges),
-        fert_org = any(fert_org), village = unique(village)
+        fert_org = any(fert_org), village = unique(village)[1]
     )
 ```
 
 ```{r}
 
-alters |> summarize(n = n()) |> arrange(desc(n))
+alters |> group_by(node_id) |>  summarize(n = n()) |> arrange(desc(n))
 
-alters$village[c(39,98,134)] <- c(1,3,1)
+alters$village[132] <- "1" # alters$village[c(39,98,134)] <- c("1","3","1")
 alters$name[21] <- alters$name[20]
 
 alters <- alters |> 
@@ -284,6 +298,9 @@ net %v% "futuferti" <- nodes$futuferti
 net %v% "indegree" <- nodes$indegree
 net %v% "outdegree" <- nodes$outdegree
 net %v% "betweenness" <- nodes$bet
+## adding coordinates as attributes to ease selecting subnets
+net %v% "lon" <- nodes$Longitud
+net %v% "lat" <- nodes$Latitud
 ```
 
 Edge attributes:
@@ -295,7 +312,12 @@ edges <- edges |>
     rename(rela_contracts = rela_1, rela_transaction = rela_2, 
            rela_professional = rela_3, rela_trust = rela_4, rela_friends = rela_5,
            rela_family = rela_6, rela_acquintance = rela_7)
-    )
+    ) |> 
+    mutate(close = case_when(
+        close == 1 ~ 5, close == 2 ~ 4, close == 4 ~ 2, close == 5 ~ 1, .default = close
+    ))
+
+
 atrs <- names(edges)[5:13]
 # for (i in seq_along(atrs)){
 #     net %e% atrs[i] <- edges[atrs[i]]
@@ -311,115 +333,243 @@ net %e% "rela_family" <- edges$rela_family
 net %e% "rela_acquintance" <- edges$rela_acquintance
     
 
-save(net, nodes, edges, file = "data/network_cleaned.Rda")
+# save(net, nodes, edges, file = "data/network_cleaned.Rda")
 ```
 
 For response variables we probably need to code them as categorical or continuous.
 Categorical may be more convenient in ergms, but continuous if used as a response variable in a linear model.
 
-## LNAM \| BNAM
+## Modelling
 
+From now on the script is improved to isolate repetation and separate data manipulation from modeling per se.
+
+Load data and libraries:
 ```{r}
 load("data/network_cleaned.Rda")
 library(sna)
-
-e <- node_attrs |> 
-    filter(!is.na(shadechanges), !is.na(age)) |> 
-    pull(node_id)
-
-node_attrs <-  node_attrs |> left_join(nodes)
-
-
-fit <- lnam(
-    y = node_attrs |> 
-        filter(node_id %in% e) |> 
-        mutate(shadechanges = case_when(
-            shadechanges == "Sembrado" ~ 1,
-            shadechanges == "Disminuido" ~ -1,
-            .default = 0
-        )) |>
-        pull(shadechanges),
-    x = node_attrs |> ungroup() |> 
-        filter(node_id %in% e) |> 
-        mutate(intercept = 1) |> 
-        select(intercept, village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso, tspecies, shalev, indegree, outdegree, bet) |>
-        mutate(village = as.numeric(village),
-            area = case_when(is.na(area) ~ 5.1, .default = area),
-            sex = case_when(sex == "male" ~ 0, .default = 1),
-            education = case_when(
-                education == "none" ~ 0, education == "primary" ~ 1,
-                education == "secondary"~2, education == "superior" ~ 3,
-                .default = 0),
-            training_shade = as.numeric(training_shade), 
-            nespresso = as.numeric(nespresso),
-            interact = shalev * leader) |> 
-        as.matrix(),
-    W1 = list(
-        as.matrix.network.adjacency(
-            get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
-            attrname = "close")
-        ),
-    W2 = list(
-        as.matrix.network.adjacency(
-            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
-            attrname = "frequency")
-        )
-)
-
-summary(fit)
-
-#stargazer(fit, header = FALSE)
+library(network)
 ```
+
+Most models are done for a subnetwork for which we have complete data. Before we selected as the actors with age (egos), but now we want to control for geographic distance, so we need to include only people with coordinates.
 
 ```{r}
-library(BANAM)
+# this was made by Maria, don't know why (well recover the id from nodes)
+node_attrs <-  node_attrs |> left_join(nodes)
 
-bfit <- banam(
-      (node_attrs |> 
-        filter(node_id %in% e) |> 
-        mutate(shadechanges = case_when(
-            shadechanges == "Sembrado" ~ 1,
-            shadechanges == "Disminuido" ~ -1,
-            .default = 0
-        )) |> pull(shadechanges)) ,
-      X = (node_attrs |> ungroup() |> 
-        filter(node_id %in% e) |> 
-       # mutate(intercept = 1) |> 
-        select(village, leader, sex, clipercbio, clipercdefo, area, expe, education, age, training_shade, nespresso, tspecies, shalev, indegree, outdegree, bet) |>
-        mutate(village = as.numeric(village),
-            area = case_when(is.na(area) ~ 5.1, .default = area),
-            sex = case_when(sex == "male" ~ 0, .default = 1),
-            education = case_when(
-                education == "none" ~ 0, education == "primary" ~ 1,
-                education == "secondary"~2, education == "superior" ~ 3,
-                .default = 0),
-            training_shade = as.numeric(training_shade), 
-            nespresso = as.numeric(nespresso)) |> 
-        as.matrix()),
-      W = list(
-        as.matrix.network.adjacency(
-            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
-            attrname = "frequency"),
-        as.matrix.network.adjacency(
-            x = get.inducedSubgraph(net, v = which(!is.na(net %v% "age")) ),
-            attrname = "close")
-        )
-)
+## select subnetwork (we don't need the edge list again)
+subnet <- get.inducedSubgraph(net, v = which(!is.na(net %v% "lon")) ) 
 
-summary(bfit)
+# e is an index of nodes of the subnetwork
+e <- subnet %v% "vertex.names"
+
+# Y is the response vector in the regressions: structural changes
+Y <- node_attrs |> 
+    filter(node_id %in% e) |> 
+    mutate(shadechanges = case_when(
+        shadechanges == "Sembrado" ~ 3,
+        shadechanges == "Disminuido" ~ 1,
+        .default = 2
+    )) |>
+    pull(shadechanges)
+
+# X is a matrix of covariates
+X <- node_attrs |> ungroup() |> 
+    filter(node_id %in% e) |> 
+    mutate(intercept = 1) |> 
+    select(intercept, training_shade, village, education, age, sex, leader, tspecies) |>
+    mutate(
+        village = as.numeric(village),
+        sex = case_when(sex == "male" ~ 0, .default = 1),
+        education = case_when(
+            education == "none" ~ 0, education == "primary" ~ 1,
+            education == "secondary"~2, education == "superior" ~ 3,
+            .default = 0),
+        training_shade = as.numeric(training_shade)
+    ) |> 
+    as.matrix()
 ```
 
-## ERGMs
+For modelling purposes, we will use `W1` and `W2` as matrix covariates that control for variables of interest. 
+
+`W1` in **Model 1** (Model presentation to Selva August 2025)
+Weighted by Frequency that people see each other. We select only 3 & 4 values. And then normalize. The normalization is by row so at the end it sums one. I will illustrate with an example: If a person has two contact, one with 3 and another with 4, so the normalization is doing the following: 3+4=7 Then. 3/7=0.043  4/7=0.57
+
+```{r}
+W1_matrix  <- as.matrix.network.adjacency(subnet, attrname = "frequency") 
+W1_matrix[!(W1_matrix %in% c(3, 4))] <- 0  #only 3 & 4 values.
+W1_norm <- W1_matrix / rowSums(W1_matrix) #normalize the network
+W1_norm[is.na(W1_norm)] <- 0
+```
+
+`W2` is the matrix of distance between people:
+
+```{r}
+library(sf)
+pnts <- tibble(node_id = subnet %v% "vertex.names") |> 
+    left_join(nodes |> select(node_id, lon = Longitud, lat = Latitud))
+pnts <- st_as_sf(pnts, coords = c("lon", "lat"), crs = 4326)
+w2 <- st_distance(pnts, by_element = FALSE)
+```
+
+Now we can isolate cleanly the model steps and make sure that across models the same data is entering the formulas:
+
+### LNAM 
+
+Fit the model: 
+```{r}
+fit1 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit1)
+```
+**Model 2**. Weighted by Frequency Only with 3 &4, and living 3 and 4 like that. No normalization. 
+
+```{r}
+W1_matrix  <- as.matrix.network.adjacency(subnet, attrname = "frequency") 
+W1_matrix[!(W1_matrix %in% c(3, 4))] <- 0 
+
+fit2 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit2)
+```
+
+**Model 3**. Weighted by Frequency. Only considers 3 & 4 options of more strongest ties, and we give them both a value of 1. No normalization
+
+```{r}
+W1_matrix  <- as.matrix.network.adjacency(subnet, attrname = "frequency") 
+W1_matrix[!(W1_matrix %in% c(3, 4))] <- 0  #only 3 & 4 values.
+W1_matrix[W1_matrix %in% c(3, 4)] <- 1 #give value of 1 to 3& 4 values
+W1_matrix[W1_matrix != 1] <- 0  
+
+fit3 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit3)
+```
+
+**Model 4** is not weighted:
+
+```{r}
+W1_matrix <- as.matrix.network.adjacency(subnet) 
+
+fit4 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit4)
+```
+
+**Model 5** Weighted by the amount of people connected. More people, less value.
+
+```{r}
+adj <- as.matrix.network.adjacency(subnet, matrix.type = "adjacency") 
+row_sums <- rowSums(adj) ##normalize the matrix
+row_sums[row_sums == 0] <- 1 
+W1_matrix <- adj / row_sums
+
+fit5 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit5)
+```
+
+**Model 6.** (Model suggested by Angela in Oct. 2025) Weighted by Frequency that people see each other. We select only 3 & 4 values and give them a value of 1. And then normalized. The normalization is by row normalization is based on the total of ties, not only the number of strong ties.
+
+```{r}
+freq_mat <- as.matrix.network.adjacency(subnet, attrname = "frequency")
+strong_mat <- freq_mat
+strong_mat[strong_mat %in% c(3, 4)] <- 1
+strong_mat[!(strong_mat %in% c(1))] <- 0  # everything else 0
+total_ties <- freq_mat
+total_ties[total_ties > 0] <- 1
+row_sums <- rowSums(total_ties)
+row_sums[row_sums == 0] <- 1
+W1_matrix <- strong_mat / row_sums
+W1_matrix[is.na(W1_matrix)] <- 0
+
+fit6 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit6)
+```
+**Model 7** (strong and weak ties)
+
+```{r}
+weak_mat <- as.matrix.network.adjacency(subnet, attrname = "frequency")
+strong_mat <- as.matrix.network.adjacency(subnet, attrname = "frequency")
+
+
+strong_mat[strong_mat %in% c(3, 4)] <- 1
+strong_mat[!(strong_mat %in% c(1))] <- 0  # everything else 0
+weak_mat[weak_mat %in% c(1, 2)] <- 1
+weak_mat[!(weak_mat %in% c(1))] <- 0
+
+W1_matrix <- strong_mat / row_sums
+W1_matrix[is.na(W1_matrix)] <- 0
+W2_matrix <- weak_mat / row_sums
+W2_matrix[is.na(W2_matrix)] <- 0
+
+
+fit7 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = W2_matrix)
+summary(fit7)
+
+```
+**Model 8.** Emotions (same model 6 of frequency)
+Model suggested by Angela in Oct. 2025, but with emotions. 
+Weighted by emotions. We select 1 as strong, and 2, 3, 4, 5 as weak. So we only selec values of 1. And then normalized. The normalization is by row so at the end it sums one.The normalization is based on the total of ties, not only the number of strong ties.
+
+```{r}
+freq_mat <- as.matrix.network.adjacency(subnet, attrname = "close")
+strong_mat <- freq_mat
+strong_mat[strong_mat %in% c(1,2)] <- 1
+strong_mat[!(strong_mat %in% c(1))] <- 0  # everything else 0
+total_ties <- freq_mat
+total_ties[total_ties > 0] <- 1
+row_sums <- rowSums(total_ties)
+row_sums[row_sums == 0] <- 1
+W1_matrix <- strong_mat / row_sums
+W1_matrix[is.na(W1_matrix)] <- 0
+
+
+fit8 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit8)
+
+```
+**Model 9** (like the three but with emotions)
+Weighted `W1` by Frequency. Only considers 1 options of more strongest ties. No normalization
+
+```{r}
+# this line had "emotions" in attrname, throwing error
+W1_matrix  <- as.matrix.network.adjacency(subnet, attrname = "frequency") 
+W1_matrix[!(W1_matrix %in% c(3, 4))] <- 0  #only 1 values.
+W1_matrix[W1_matrix %in% c(3, 4)] <- 1 #give value of 1 to 3& 4 values
+W1_matrix[W1_matrix != 1] <- 0  
+
+fit9 <- lnam(y = Y, x = X, W1 = W1_matrix, W2 = w2)
+summary(fit9)
+```
+### BNAM
+
+Stopped running here, all code commented out
+
+```{r}
+# library(BANAM)
+# 
+# W1_matrix  <- as.matrix.network.adjacency(subnet, attrname = "frequency") 
+# 
+# bfit <- banam(Y, X, W = list(W1_matrix, w2))
+# 
+# summary(bfit)
+```
+
+### ERGMs
 
 Exponential random graph models explore the generative process of the network by modeling link formation, the probability of a link.
 It is not sufficient to explore network diffusion / network influence.
 But if the behaviour we want to test is adoption of shading or organic fertilizing, and it is socially diffused, the prob of links should be higher between people with such attributes, and stronger (e.g. edge weight).
 
 ```{r}
-fit_ego <- ergm(
-    get.inducedSubgraph(net, v = which(!is.na(net %v% "age"))) ~ edges +
-        
-)
-
-summary(fit_ego)
+# fit_ego <- ergm(
+#     get.inducedSubgraph(net, v = which(!is.na(net %v% "age"))) ~ edges )
+# 
+# summary(fit_ego)
 ```
+
+### correlations
+
+```{r}
+ct <- cor.test(net %e% "frequency", net %e% "close", method = "kendall")
+ct
+```
+
+## Ideas for future models:
+
+- Create a similarity matrix of the people with respect to their answers in the survey (e.g. perceptions). Use that matrix (symmetric) as weight W in the LNAM / BNAM.
