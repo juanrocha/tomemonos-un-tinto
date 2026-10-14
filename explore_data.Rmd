@@ -1,7 +1,7 @@
 ---
 title: "Exploring NetAdopt data"
 author: "Juan Rocha"
-date: "2026-07-08"
+date: "2026-10-14"
 output:
   html_document:
     toc: true
@@ -341,7 +341,7 @@ Categorical may be more convenient in ergms, but continuous if used as a respons
 
 ## Modelling
 
-From now on the script is improved to isolate repetation and separate data manipulation from modeling per se.
+From now on the script is improved to isolate repetition and separate data manipulation from modeling per se.
 
 Load data and libraries:
 ```{r}
@@ -360,11 +360,14 @@ node_attrs <-  node_attrs |> left_join(nodes)
 subnet <- get.inducedSubgraph(net, v = which(!is.na(net %v% "lon")) ) 
 
 # e is an index of nodes of the subnetwork
-e <- subnet %v% "vertex.names"
+keep_order <- tibble(
+    node_id = subnet %v% "vertex.names"
+) |> rownames_to_column(var="order")
+
 
 # Y is the response vector in the regressions: structural changes
 Y <- node_attrs |> 
-    filter(node_id %in% e) |> 
+    right_join(keep_order) |> arrange(order) |> ## preserving order of network
     mutate(shadechanges = case_when(
         shadechanges == "Sembrado" ~ 3,
         shadechanges == "Disminuido" ~ 1,
@@ -374,7 +377,7 @@ Y <- node_attrs |>
 
 # X is a matrix of covariates
 X <- node_attrs |> ungroup() |> 
-    filter(node_id %in% e) |> 
+    right_join(keep_order) |> arrange(order) |>
     mutate(intercept = 1) |> 
     select(intercept, training_shade, village, education, age, sex, leader, tspecies) |>
     mutate(
